@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>M7 MEDIA DESTROYER (IMAGE + VIDEO)</title>
+<script src="node_modules/@ffmpeg/ffmpeg/dist/umd/ffmpeg.js"></script>
+<style>
+body { background: #050505; color: #ff00ff; font-family: monospace; display: flex; flex-direction: column; align-items: center; padding: 20px; }
+.ui-panel { border: 2px solid #ff00ff; padding: 20px; background: #111; margin-bottom: 20px; width: 80%; max-width: 900px; box-shadow: 0 0 25px rgba(255, 0, 255, 0.3); }
+.control-group { background: #1a1a1a; border: 1px solid #444; padding: 15px; margin: 15px 0; border-left: 4px solid #ff00ff; transition: opacity 0.3s; }
+.audio-group { border-left: 4px solid #00ffff; }
+.slider-row { display: flex; justify-content: space-between; align-items: center; margin-top: 10px; }
+canvas { border: 1px solid #444; width: 100%; max-height: 60vh; image-rendering: pixelated; margin-top: 15px; background: #000; }
+.log { background: #000; color: #0f0; padding: 10px; height: 120px; overflow-y: auto; text-align: left; font-size: 12px; border: 1px solid #0f0; margin-top: 15px; }
+.progress-bar { width: 100%; height: 10px; background: #222; margin: 10px 0; position: relative; }
+#fill { height: 100%; background: #0f0; width: 0%; transition: width 0.1s; }
+button { background: #ff00ff; color: #000; border: none; padding: 15px 20px; font-weight: bold; cursor: pointer; width: 100%; font-size: 18px; text-transform: uppercase; }
+button:disabled { background: #333; color: #666; cursor: not-allowed; }
+input[type="range"] { width: 60%; }
+label { font-weight: bold; color: #ccc; cursor: pointer; }
+h3 { margin-top: 0; font-size: 16px; letter-spacing: 1px; }
+</style>
+</head>
+<body>
+<div class="ui-panel">
+<h2 style="text-align: center; margin-top: 0;">M7 HYBRID MEDIA DESTROYER</h2>
+<input type="file" id="fileInput" accept="video/mp4, image/jpeg, image/png, image/webp" style="margin-bottom: 10px; width: 100%; padding: 10px; background: #222; color: #fff; border: 1px solid #444; box-sizing: border-box;">
+
+<div class="control-group">
+<h3 style="color: #ff00ff;">VISUAL SENSOR SETTINGS</h3>
+<label>
+  <input type="radio" name="mode" value="legacy"> LEGACY M7 (Raw Purple Sludge)
+</label>
+<br><br>
+<label>
+  <input type="radio" name="mode" value="custom" checked> ADVANCED TINT (Controlled Shift)
+</label>
+<div id="customControls" style="margin-top: 15px; padding-top: 15px; border-top: 1px dashed #444;">
+  <div class="slider-row">
+    <label>Target Hex Color:</label>
+    <input type="color" id="shiftColor" value="#583644">
+  </div>
+  <div class="slider-row">
+    <label>Luminance Ceiling <br><small>(Max brightness affected)</small></label>
+    <input type="range" id="ceilingSlider" min="0" max="1" step="0.01" value="0.35">
+    <span id="ceilVal">0.35</span>
+  </div>
+  <div class="slider-row">
+    <label>Intensity Floor <br><small>(Shift strength at total black)</small></label>
+    <input type="range" id="floorSlider" min="0" max="2" step="0.05" value="1.0">
+    <span id="floorVal">1.0</span>
+  </div>
+</div>
+</div>
+
+<div class="control-group audio-group" id="audioPanel">
+<h3 style="color: #00ffff;">AUDIO DEGRADATION (Video Only)</h3>
+<label style="display: block; margin-bottom: 8px;">
+  <input type="radio" name="audioMode" value="copy" checked> Original (Pristine, No Quality Loss)
+</label>
+<label style="display: block; margin-bottom: 8px; color: #ff5555;">
+  <input type="radio" name="audioMode" value="fried"> Deep Fried (Massive Gain + Bass Boost)
+</label>
+<label style="display: block; color: #ffaa00;">
+  <input type="radio" name="audioMode" value="crappy"> 2013 Flip Phone Mic (8kHz + Muffled)
+</label>
+</div>
+
+<button id="runBtn" disabled>INITIATE RENDER SEQUENCE</button>
+<div class="progress-bar"><div id="fill"></div></div>
+<div id="status" style="color: #fff; font-weight: bold; text-align: center;">Status: Waiting for media...</div>
+<canvas id="liveCanvas"></canvas>
+<div class="log" id="logBox">SYSTEM BOOTED. WAITING FOR UPLOAD...</div>
+</div>
+
+<script>
+const { FFmpeg } = FFmpegWASM;
+const ffmpeg = new FFmpeg();
+
+document.getElementById('ceilingSlider').oninput = (e) => document.getElementById('ceilVal').innerText = e.target.value;
+document.getElementById('floorSlider').oninput = (e) => document.getElementById('floorVal').innerText = e.target.value;
+
+const radios = document.querySelectorAll('input[name="mode"]');
+radios.forEach(r => r.addEventListener('change', (e) => {
+  document.getElementById('customControls').style.opacity = e.target.value === 'custom' ? '1' : '0.3';
+  document.getElementById('customControls').style.pointerEvents = e.target.value === 'custom' ? 'auto' : 'none';
+}));
+
+async function fetchFile(data) {
+  if (typeof data === 'string') {
+    const res = await fetch(data);
+    return new Uint8Array(await res.arrayBuffer());
+  } else if (data instanceof File || data instanceof Blob) {
+    return new Uint8Array(await data.arrayBuffer());
+  }
+}
+
+const runBtn = document.getElementById('runBtn');
+const fileInput = document.getElementById('fileInput');
+const canvas = document.getElementById('liveCanvas');
+const ctx = canvas.getContext('2d', { willReadFrequently: true });
+const logBox = document.getElementById('logBox');
+const audioPanel = document.getElementById('audioPanel');
+
+function log(m) {
+  logBox.innerHTML += `> ${m}<br>`;
+  logBox.scrollTop = logBox.scrollHeight;
+}
+
+fileInput.onchange = () => {
+  const file = fileInput.files[0];
+  if (!file) return;
+  runBtn.disabled = false;
+  if (file.type.startsWith('image/')) {
+    document.getElementById('status').innerText = "Status: Static Image loaded! Ready to fry.";
+    audioPanel.style.opacity = '0.3';
+    audioPanel.style.pointerEvents = 'none';
+    log("Image acquired. Audio subsystem disabled.");
+  } else {
+    document.getElementById('status').innerText = "Status: Video loaded! Ready to destroy.";
+    audioPanel.style.opacity = '1';
+    audioPanel.style.pointerEvents = 'auto';
+    log("Video acquired. Full subsystems ready.");
+  }
+};
+
+runBtn.onclick = async () => {
+  runBtn.disabled = true;
+
+  const mode = document.querySelector('input[name="mode"]:checked').value;
+  const audioMode = document.querySelector('input[name="audioMode"]:checked').value;
+  const hex = document.getElementById('shiftColor').value;
+  const R_t = parseInt(hex.substr(1,2), 16), G_t = parseInt(hex.substr(3,2), 16), B_t = parseInt(hex.substr(5,2), 16);
+  const ceiling = parseFloat(document.getElementById('ceilingSlider').value);
+  const floor = parseFloat(document.getElementById('floorSlider').value);
+  const file = fileInput.files[0];
+  const isImage = file.type.startsWith('image/');
+
+  if (isImage) {
+    log("Executing instant image degradation...");
+    document.getElementById('status').innerText = "Status: Frying image pixels...";
+    const img = new Image();
+    img.src = URL.createObjectURL(file);
+    await new Promise(r => img.onload = r);
+    canvas.width = img.width;
+    canvas.height = img.height;
+    ctx.drawImage(img, 0, 0);
+    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const d = imgData.data;
+
+    for (let p = 0; p < d.length; p += 4) {
+      const r = d[p], g = d[p+1], b = d[p+2];
+      const L = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+      if (mode === 'legacy') {
+        const w = Math.pow(1.0 - L, 2) * 255;
+        d[p] = Math.min(255, r + w);
+        d[p+2] = Math.min(255, b + w);
+      } else {
+        if (L < ceiling) {
+          const depth = (ceiling - L) / ceiling;
+          const w = Math.pow(depth, 2) * floor;
+          d[p] = Math.min(255, r + (R_t * w));
+          d[p+1] = Math.min(255, g + (G_t * w));
+          d[p+2] = Math.min(255, b + (B_t * w));
+        }
+      }
+    }
+
+    ctx.putImageData(imgData, 0, 0);
+    document.getElementById('fill').style.width = `100%`;
+    log("IMAGE RENDER COMPLETE.");
+    document.getElementById('status').innerText = "Status: COMPLETE. Your cursed image is ready.";
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.95);
+    createDownloadBtn(dataUrl, `cursed_image_${mode}.jpg`);
+    return;
+  }
+
+  log("Mounting CDN FFmpeg Core for Video Processing...");
+  try {
+    await ffmpeg.load({
+      coreURL: "node_modules/@ffmpeg/core/dist/umd/ffmpeg-core.js",
+     wasmURL: "node_modules/@ffmpeg/core/dist/umd/ffmpeg-core.wasm"
+    });
+  } catch (e) {
+    log("ERROR: " + e.message); return;
+  }
+
+  await ffmpeg.writeFile('input.mp4', await fetchFile(file));
+
+  const video = document.createElement('video');
+  video.src = URL.createObjectURL(file);
+  video.muted = true;
+  await new Promise(r => video.onloadedmetadata = r);
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+
+  const totalFrames = Math.floor(video.duration * 30);
+  log(`Extracting & shifting ${totalFrames} frames...`);
+
+  for (let i = 0; i < totalFrames; i++) {
+    video.currentTime = i / 30;
+    await new Promise(r => video.onseeked = r);
+    ctx.drawImage(video, 0, 0);
+    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const d = imgData.data;
+
+    for (let p = 0; p < d.length; p += 4) {
+      const r = d[p], g = d[p+1], b = d[p+2];
+      const L = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+      if (mode === 'legacy') {
+        const w = Math.pow(1.0 - L, 2) * 255;
+        d[p] = Math.min(255, r + w);
+        d[p+2] = Math.min(255, b + w);
+      } else {
+        if (L < ceiling) {
+          const depth = (ceiling - L) / ceiling;
+          const w = Math.pow(depth, 2) * floor;
+          d[p] = Math.min(255, r + (R_t * w));
+          d[p+1] = Math.min(255, g + (G_t * w));
+          d[p+2] = Math.min(255, b + (B_t * w));
+        }
+      }
+    }
+
+    ctx.putImageData(imgData, 0, 0);
+    const frameData = canvas.toDataURL('image/jpeg', 0.9);
+    await ffmpeg.writeFile(`f${i}.jpg`, await fetchFile(frameData));
+    document.getElementById('fill').style.width = `${(i/totalFrames)*100}%`;
+    if (i % 20 === 0) log(`[FRAME ${i}] Rendered.`);
+  }
+
+  log(`Muxing phase. Audio Profile: ${audioMode.toUpperCase()}`);
+  document.getElementById('status').innerText = "Status: Recombining and processing audio... (Please wait)";
+
+  let ffmpegArgs = [
+    '-framerate', '30',
+    '-i', 'f%d.jpg',
+    '-i', 'input.mp4',
+    '-map', '0:v:0',
+    '-map', '1:a:0?',
+    '-c:v', 'libx264',
+    '-preset', 'ultrafast',
+    '-crf', '23',
+    '-pix_fmt', 'yuv420p',
+    '-shortest'
+  ];
+
+  if (audioMode === 'copy') {
+    ffmpegArgs.push('-c:a', 'copy');
+  } else if (audioMode === 'fried') {
+    ffmpegArgs.push('-c:a', 'aac', '-af', 'volume=15.0, bass=g=20:f=110');
+  } else if (audioMode === 'crappy') {
+    ffmpegArgs.push('-c:a', 'aac', '-ar', '8000', '-af', 'lowpass=f=2500, volume=3.0');
+  }
+
+  ffmpegArgs.push('out.mp4');
+  await ffmpeg.exec(ffmpegArgs);
+
+  const data = await ffmpeg.readFile('out.mp4');
+  const url = URL.createObjectURL(new Blob([data.buffer], { type: 'video/mp4' }));
+  log("VIDEO RENDER COMPLETE.");
+  document.getElementById('status').innerText = "Status: COMPLETE. Your cursed media is ready.";
+  createDownloadBtn(url, `cursed_video_${audioMode}.mp4`);
+};
+
+function createDownloadBtn(url, filename) {
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.innerText = `🚨 DOWNLOAD ${filename.includes('.mp4') ? 'VIDEO' : 'IMAGE'} 🚨`;
+  a.style.cssText = "display: block; background: #ff00ff; color: #000; text-align: center; padding: 20px; text-decoration: none; font-weight: bold; font-size: 20px; margin-top: 20px; border-radius: 5px; animation: pulse 1.5s infinite;";
+  if (!document.getElementById('pulseAnim')) {
+    const style = document.createElement('style');
+    style.id = 'pulseAnim';
+    style.innerHTML = `@keyframes pulse { 0% { transform: scale(1); } 50% { transform: scale(1.02); } 100% { transform: scale(1); } }`;
+    document.head.appendChild(style);
+  }
+  document.querySelector('.ui-panel').appendChild(a);
+}
+</script>
+</body>
+</html>
